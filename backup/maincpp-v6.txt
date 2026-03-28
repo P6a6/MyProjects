@@ -8,19 +8,7 @@
 #define DIR_PIN 4
 #define EN_PIN 16
 #define HOME_SENSOR_PIN 18
-#define PSU_PIN 5        // PC Power Supply control
-#define CEILING_LAMP_PIN 13  // Ceiling lamp toggle (existing pulse-based logic)
-
-// MOSFET outputs (12V DC loads)
-#define DESK_LAMP_PIN     25  // PWM dimming via LEDC
-#define CHARGER_PIN       26  // Phone charger on/off
-#define CORRIDOR_PIN      27  // Corridor lamp on/off
-#define DESK_LAMP2_PIN    14  // Desk light 2 - PWM dimming via LEDC
-
-#define DESK_LAMP_LEDC_CHANNEL  0
-#define DESK_LAMP2_LEDC_CHANNEL 1
-#define DESK_LAMP_LEDC_FREQ     1000
-#define DESK_LAMP_LEDC_RES      8    // 8-bit: 0-255
+#define PSU_PIN 5  // PC Power Supply control
 
 // WiFi credentials
 const char* ssid = "VM6159022";
@@ -36,20 +24,12 @@ bool motorRunning = false;
 bool isHomed = false;
 bool positionLost = false;
 
-// MOSFET state
-int  deskBrightness   = 0;    // 0-100 percent (user-facing)
-int  deskCurrentDuty  = 0;    // 0-255 actual LEDC duty (tracks real current level for fading)
-int  desk2Brightness  = 0;
-int  desk2CurrentDuty = 0;
-bool chargerOn        = false;
-bool corridorOn       = false;
-
-// Constants (1/16 microstepping - MS1/MS2/MS3 all wired to 3.3V)
+// Constants - EXACTLY AS ORIGINAL
 const int HOMING_TIMEOUT_MS = 90000;
-const int HOMING_SPEED_DELAY = 1600;
-const int NORMAL_SPEED_DELAY = 950;
-const int HEAVY_LOAD_DELAY = 1600;
-const int MANUAL_STEP_SIZE = 1600;  // ~0.5 rev per manual tap at 1/16 step
+const int HOMING_SPEED_DELAY = 2000;
+const int NORMAL_SPEED_DELAY = 2000;
+const int HEAVY_LOAD_DELAY = 3000;
+const int MANUAL_STEP_SIZE = 300;
 const int EEPROM_ADDRESS = 0;
 
 // Embedded HTML
@@ -309,22 +289,8 @@ void handleSiriUp();
 void handleSiriDown();
 void handlePsuOn();
 void handlePsuOff();
-void handleCeilingLampToggle();
 void autoHome();
 void moveToPosition(int targetPosition);
-void motorBeep(int frequency, int durationMs);
-void fadeDesk(int targetPercent);
-void fadeDesk2(int targetPercent);
-void handleDeskOn();
-void handleDeskOff();
-void handleDeskBrightness();
-void handleChargerOn();
-void handleChargerOff();
-void handleCorridorOn();
-void handleCorridorOff();
-void handleDesk2On();
-void handleDesk2Off();
-void handleDesk2Brightness();
 
 void setup() {
   Serial.begin(115200);
@@ -335,19 +301,6 @@ void setup() {
   pinMode(EN_PIN, OUTPUT);
   pinMode(HOME_SENSOR_PIN, INPUT_PULLUP);
   pinMode(PSU_PIN, INPUT);  // PSU OFF by default (floating)
-  pinMode(CEILING_LAMP_PIN, INPUT);  // Ceiling lamp - floating to prevent boot trigger
-
-  // MOSFET outputs — LOW before anything else so they don't fire at boot
-  pinMode(DESK_LAMP_PIN, OUTPUT);  digitalWrite(DESK_LAMP_PIN, LOW);
-  pinMode(CHARGER_PIN,   OUTPUT);  digitalWrite(CHARGER_PIN,   LOW);
-  pinMode(CORRIDOR_PIN,  OUTPUT);  digitalWrite(CORRIDOR_PIN,  LOW);
-  pinMode(DESK_LAMP2_PIN, OUTPUT);  digitalWrite(DESK_LAMP2_PIN, LOW);
-
-  // PWM for desk lamps
-  ledcSetup(DESK_LAMP_LEDC_CHANNEL,  DESK_LAMP_LEDC_FREQ, DESK_LAMP_LEDC_RES);
-  ledcAttachPin(DESK_LAMP_PIN,  DESK_LAMP_LEDC_CHANNEL);
-  ledcSetup(DESK_LAMP2_LEDC_CHANNEL, DESK_LAMP_LEDC_FREQ, DESK_LAMP_LEDC_RES);
-  ledcAttachPin(DESK_LAMP2_PIN, DESK_LAMP2_LEDC_CHANNEL);
 
   digitalWrite(STEP_PIN, LOW);
   digitalWrite(DIR_PIN, HIGH);
@@ -371,13 +324,6 @@ void setup() {
   Serial.print("IP address: ");
   Serial.println(WiFi.localIP());
 
-  // Startup chime
-  motorBeep(440, 120);
-  delay(60);
-  motorBeep(660, 120);
-  delay(60);
-  motorBeep(880, 180);
-
   server.on("/", handleRoot);
   server.on("/control", HTTP_POST, handleControl);
   server.on("/status", HTTP_GET, handleStatus);
@@ -385,17 +331,6 @@ void setup() {
   server.on("/curtain/down", HTTP_GET, handleSiriDown);
   server.on("/psu/on", HTTP_GET, handlePsuOn);
   server.on("/psu/off", HTTP_GET, handlePsuOff);
-  server.on("/lamp/toggle", HTTP_GET, handleCeilingLampToggle);
-  server.on("/desk/on", HTTP_GET, handleDeskOn);
-  server.on("/desk/off", HTTP_GET, handleDeskOff);
-  server.on("/desk/brightness", HTTP_GET, handleDeskBrightness);
-  server.on("/charger/on", HTTP_GET, handleChargerOn);
-  server.on("/charger/off", HTTP_GET, handleChargerOff);
-  server.on("/corridor/on", HTTP_GET, handleCorridorOn);
-  server.on("/corridor/off", HTTP_GET, handleCorridorOff);
-  server.on("/desk2/on", HTTP_GET, handleDesk2On);
-  server.on("/desk2/off", HTTP_GET, handleDesk2Off);
-  server.on("/desk2/brightness", HTTP_GET, handleDesk2Brightness);
 
   server.begin();
   Serial.println("Web server started!");
@@ -406,19 +341,6 @@ void setup() {
   Serial.println("\n=== PSU URLs ===");
   Serial.println("ON:  http://" + WiFi.localIP().toString() + "/psu/on");
   Serial.println("OFF: http://" + WiFi.localIP().toString() + "/psu/off");
-  Serial.println("\n=== Ceiling Lamp ===");
-  Serial.println("Toggle: http://" + WiFi.localIP().toString() + "/lamp/toggle");
-  Serial.println("\n=== MOSFET Devices ===");
-  Serial.println("Desk ON:     http://" + WiFi.localIP().toString() + "/desk/on");
-  Serial.println("Desk OFF:    http://" + WiFi.localIP().toString() + "/desk/off");
-  Serial.println("Desk Dim:    http://" + WiFi.localIP().toString() + "/desk/brightness?level=75");
-  Serial.println("Charger ON:  http://" + WiFi.localIP().toString() + "/charger/on");
-  Serial.println("Charger OFF: http://" + WiFi.localIP().toString() + "/charger/off");
-  Serial.println("Corridor ON: http://" + WiFi.localIP().toString() + "/corridor/on");
-  Serial.println("Corridor OFF:http://" + WiFi.localIP().toString() + "/corridor/off");
-  Serial.println("Desk2 ON:    http://" + WiFi.localIP().toString() + "/desk2/on");
-  Serial.println("Desk2 OFF:   http://" + WiFi.localIP().toString() + "/desk2/off");
-  Serial.println("Desk2 Dim:   http://" + WiFi.localIP().toString() + "/desk2/brightness?level=75");
 
   Serial.println("Auto-homing...");
   autoHome();
@@ -477,18 +399,6 @@ void handlePsuOff() {
   Serial.println("*** PSU: OFF ***");
   pinMode(PSU_PIN, INPUT);  // Floating = PSU OFF
   server.send(200, "text/plain", "PSU OFF");
-}
-
-void handleCeilingLampToggle() {
-  Serial.println("*** CEILING LAMP: TOGGLE ***");
-  server.send(200, "text/plain", "Toggling");  // Respond immediately
-  
-  pinMode(CEILING_LAMP_PIN, OUTPUT);
-  digitalWrite(CEILING_LAMP_PIN, LOW);  // Ground for toggle
-  delay(400);  // Brief pulse - 400ms
-  pinMode(CEILING_LAMP_PIN, INPUT);  // Back to floating
-  
-  Serial.println("Lamp toggled");
 }
 
 void handleStatus() {
@@ -551,10 +461,8 @@ void handleControl() {
       motorRunning = false;
       delay(200);
     }
-    server.send(200, "text/plain", "Homing");
     autoHome();
     positionLost = false;
-    return;
   }
   else if (action == "manual" && server.hasArg("direction")) {
     if (motorRunning) {
@@ -564,12 +472,11 @@ void handleControl() {
 
     String direction = server.arg("direction");
     int speedDelay = NORMAL_SPEED_DELAY;
-
+    
     if (currentPosition >= (closedPosition * 0.8) && direction == "up") {
       speedDelay = HEAVY_LOAD_DELAY;
     }
 
-    server.send(200, "text/plain", "Moving");
     if (direction == "up") {
       digitalWrite(DIR_PIN, HIGH);
       runMotorSteps(MANUAL_STEP_SIZE, speedDelay, true, true);
@@ -579,7 +486,6 @@ void handleControl() {
       runMotorSteps(MANUAL_STEP_SIZE, NORMAL_SPEED_DELAY, false, false);
       currentPosition += MANUAL_STEP_SIZE;
     }
-    return;
   }
   else if (action == "save") {
     if (currentPosition > 50) {
@@ -597,23 +503,19 @@ void handleControl() {
       server.send(200, "text/plain", "Busy");
       return;
     }
-    server.send(200, "text/plain", "Opening");
     autoHome();
     positionLost = false;
-    return;
   }
   else if (action == "close" && closedPosition > 0) {
     if (motorRunning) {
       server.send(200, "text/plain", "Busy");
       return;
     }
-    server.send(200, "text/plain", "Closing");
     if (positionLost) {
       autoHome();
       delay(500);
     }
     moveToPosition(closedPosition);
-    return;
   }
 
   server.send(200, "text/plain", "OK");
@@ -643,45 +545,19 @@ void autoHome() {
   int stepCount = 0;
   int consecutiveHighReadings = 0;
   const int SENSOR_CONFIRM_COUNT = 5;
-  int estimatedTotal = (currentPosition > 0) ? currentPosition : closedPosition;
 
   while (true) {
     if (millis() - startTime > HOMING_TIMEOUT_MS) {
       Serial.println("TIMEOUT");
       positionLost = true;
       motorRunning = false;
-      // Error beep pattern - three short bursts
-      for (int i = 0; i < 3; i++) {
-        motorBeep(800, 200);
-        delay(150);
-      }
       return;
-    }
-
-    if (stepCount % 50 == 0) {
-      server.handleClient();
-      if (!motorRunning) {
-        Serial.println("Homing stopped");
-        positionLost = true;
-        return;
-      }
-    }
-
-    // Dynamic speed: slow (0-40%), fast (40-85%), slow approach (85-100%)
-    int dynamicDelay = HOMING_SPEED_DELAY;
-    if (estimatedTotal > 0) {
-      float progress = (float)stepCount / estimatedTotal;
-      if (progress > 0.85f) {
-        dynamicDelay = HOMING_SPEED_DELAY;  // slow approach to sensor
-      } else if (progress > 0.4f) {
-        dynamicDelay = NORMAL_SPEED_DELAY;  // fast middle section
-      }
     }
 
     digitalWrite(STEP_PIN, HIGH);
     delayMicroseconds(50);
     digitalWrite(STEP_PIN, LOW);
-    delayMicroseconds(dynamicDelay);
+    delayMicroseconds(HOMING_SPEED_DELAY);
 
     stepCount++;
 
@@ -747,7 +623,7 @@ void runMotorSteps(int steps, int delayMicros, bool direction, bool checkSensor)
 
     if (checkSensor && direction) {
       bool sensorReading = digitalRead(HOME_SENSOR_PIN);
-
+      
       if (sensorReading == HIGH) {
         consecutiveHighReadings++;
         if (consecutiveHighReadings >= SENSOR_CONFIRM_COUNT) {
@@ -768,122 +644,4 @@ void runMotorSteps(int steps, int delayMicros, bool direction, bool checkSensor)
   }
 
   motorRunning = false;
-}
-
-// ===== MOSFET device handlers =====
-
-void handleDeskOn() {
-  server.send(200, "text/plain", "Desk fading on");
-  fadeDesk(100);
-}
-
-void handleDeskOff() {
-  server.send(200, "text/plain", "Desk fading off");
-  fadeDesk(0);
-}
-
-void handleDeskBrightness() {
-  if (!server.hasArg("level")) {
-    server.send(400, "text/plain", "Missing level (0-100)");
-    return;
-  }
-  int level = constrain(server.arg("level").toInt(), 0, 100);
-  server.send(200, "text/plain", "Desk fading to " + String(level) + "%");
-  fadeDesk(level);
-}
-
-void handleChargerOn() {
-  chargerOn = true;
-  digitalWrite(CHARGER_PIN, HIGH);
-  server.send(200, "text/plain", "Charger ON");
-}
-
-void handleChargerOff() {
-  chargerOn = false;
-  digitalWrite(CHARGER_PIN, LOW);
-  server.send(200, "text/plain", "Charger OFF");
-}
-
-void handleCorridorOn() {
-  corridorOn = true;
-  digitalWrite(CORRIDOR_PIN, HIGH);
-  server.send(200, "text/plain", "Corridor ON");
-}
-
-void handleCorridorOff() {
-  corridorOn = false;
-  digitalWrite(CORRIDOR_PIN, LOW);
-  server.send(200, "text/plain", "Corridor OFF");
-}
-
-void handleDesk2On() {
-  server.send(200, "text/plain", "Desk2 fading on");
-  fadeDesk2(100);
-}
-
-void handleDesk2Off() {
-  server.send(200, "text/plain", "Desk2 fading off");
-  fadeDesk2(0);
-}
-
-void handleDesk2Brightness() {
-  if (!server.hasArg("level")) {
-    server.send(400, "text/plain", "Missing level (0-100)");
-    return;
-  }
-  int level = constrain(server.arg("level").toInt(), 0, 100);
-  server.send(200, "text/plain", "Desk2 fading to " + String(level) + "%");
-  fadeDesk2(level);
-}
-
-
-// Fades desk lamp smoothly from current duty to target percent (0-100)
-// Full range fade (0→100 or 100→0) takes ~500ms
-void fadeDesk(int targetPercent) {
-  int targetDuty = map(targetPercent, 0, 100, 0, 255);
-  if (deskCurrentDuty == targetDuty) return;
-  int direction = (targetDuty > deskCurrentDuty) ? 1 : -1;
-  while (deskCurrentDuty != targetDuty) {
-    deskCurrentDuty += direction * 3;
-    if ((direction > 0 && deskCurrentDuty > targetDuty) ||
-        (direction < 0 && deskCurrentDuty < targetDuty)) {
-      deskCurrentDuty = targetDuty;
-    }
-    ledcWrite(DESK_LAMP_LEDC_CHANNEL, deskCurrentDuty);
-    delay(6);
-  }
-  deskBrightness = targetPercent;
-}
-
-void fadeDesk2(int targetPercent) {
-  int targetDuty = map(targetPercent, 0, 100, 0, 255);
-  if (desk2CurrentDuty == targetDuty) return;
-  int direction = (targetDuty > desk2CurrentDuty) ? 1 : -1;
-  while (desk2CurrentDuty != targetDuty) {
-    desk2CurrentDuty += direction * 3;
-    if ((direction > 0 && desk2CurrentDuty > targetDuty) ||
-        (direction < 0 && desk2CurrentDuty < targetDuty)) {
-      desk2CurrentDuty = targetDuty;
-    }
-    ledcWrite(DESK_LAMP2_LEDC_CHANNEL, desk2CurrentDuty);
-    delay(6);
-  }
-  desk2Brightness = targetPercent;
-}
-
-// Steps motor back and forth at audio frequency to produce a tone with near-zero net movement
-void motorBeep(int frequency, int durationMs) {
-  int halfPeriodUs = 1000000 / (frequency * 2);
-  unsigned long endTime = millis() + durationMs;
-  int stepCount = 0;
-  while (millis() < endTime) {
-    // Alternate direction every 4 microsteps — net movement is negligible
-    digitalWrite(DIR_PIN, (stepCount / 4) % 2 == 0 ? HIGH : LOW);
-    digitalWrite(STEP_PIN, HIGH);
-    delayMicroseconds(50);
-    digitalWrite(STEP_PIN, LOW);
-    delayMicroseconds(halfPeriodUs - 50);
-    stepCount++;
-  }
-  digitalWrite(DIR_PIN, HIGH);  // restore default direction
 }

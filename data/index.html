@@ -1,0 +1,767 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Smart Curtain Controller</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    body { 
+      font-family: 'Arial', sans-serif; 
+      margin: 0;
+      padding: 15px;
+      background: #0a0a0a;
+      color: #e0e0e0;
+      min-height: 100vh;
+      font-size: 14px;
+    }
+    
+    .container { 
+      max-width: 600px; 
+      margin: 0 auto; 
+      background: #1a1a1a; 
+      padding: 20px; 
+      border-radius: 15px; 
+      border: 1px solid #333;
+      box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5);
+    }
+    
+    h1 { 
+      color: #00ff88;
+      text-align: center; 
+      margin-bottom: 20px;
+      font-size: 24px;
+      font-weight: 300;
+      letter-spacing: 1px;
+    }
+    
+    h3 {
+      color: #00ff88;
+      margin-bottom: 12px;
+      font-weight: 400;
+      border-bottom: 1px solid #333;
+      padding-bottom: 6px;
+      font-size: 16px;
+    }
+    
+    .section { 
+      margin: 20px 0; 
+      padding: 15px; 
+      border: 1px solid #333; 
+      border-radius: 10px; 
+      background: #151515;
+    }
+    
+    button { 
+      padding: 12px 20px; 
+      margin: 6px; 
+      font-size: 14px; 
+      border-radius: 8px; 
+      border: 2px solid #00ff88; 
+      background: transparent;
+      color: #00ff88;
+      cursor: pointer; 
+      transition: all 0.3s ease;
+      min-width: 100px;
+      font-weight: 500;
+    }
+    
+    button:hover { 
+      background: rgba(0, 255, 136, 0.1);
+      transform: translateY(-1px);
+    }
+    
+    button:active {
+      transform: translateY(0);
+    }
+    
+    button:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+      transform: none;
+    }
+    
+    .btn-up {
+      border-color: #00ff88;
+      color: #00ff88;
+    }
+    .btn-up:hover {
+      background: rgba(0, 255, 136, 0.15);
+      box-shadow: 0 0 10px rgba(0, 255, 136, 0.3);
+    }
+    
+    .btn-down {
+      border-color: #ff6b00;
+      color: #ff6b00;
+    }
+    .btn-down:hover {
+      background: rgba(255, 107, 0, 0.15);
+      box-shadow: 0 0 10px rgba(255, 107, 0, 0.3);
+    }
+    
+    .btn-stop {
+      border-color: #ff3030;
+      color: #ff3030;
+    }
+    .btn-stop:hover {
+      background: rgba(255, 48, 48, 0.15);
+    }
+    
+    .btn-save {
+      border-color: #4da6ff;
+      color: #4da6ff;
+    }
+    .btn-save:hover {
+      background: rgba(77, 166, 255, 0.15);
+    }
+    
+    .btn-home {
+      border-color: #ff69b4;
+      color: #ff69b4;
+    }
+    .btn-home:hover {
+      background: rgba(255, 105, 180, 0.15);
+    }
+
+    .btn-add {
+      border-color: #00ff88;
+      color: #00ff88;
+      font-size: 16px;
+      padding: 15px 25px;
+    }
+    
+    .btn-delete {
+      border-color: #ff3030;
+      color: #ff3030;
+      padding: 6px 12px;
+      min-width: 60px;
+      font-size: 12px;
+    }
+    
+    .status-panel { 
+      background: linear-gradient(135deg, #1a3d2e, #0d2818);
+      padding: 15px; 
+      border-radius: 10px; 
+      margin: 15px 0;
+      border: 1px solid #00ff88;
+      display: flex;
+      justify-content: space-around;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 15px;
+    }
+    
+    .status-item {
+      text-align: center;
+      flex: 1;
+      min-width: 120px;
+    }
+    
+    .status-label {
+      color: #999;
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      margin-bottom: 5px;
+    }
+    
+    .status-value {
+      color: #00ff88;
+      font-size: 16px;
+      font-weight: bold;
+    }
+    
+    .status-value.warning {
+      color: #ff6b00;
+    }
+    
+    .status-value.error {
+      color: #ff3030;
+    }
+    
+    .section p {
+      margin: 8px 0;
+      color: #999;
+      font-size: 13px;
+    }
+    
+    .section small {
+      color: #777;
+    }
+    
+    .button-group {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      justify-content: center;
+      margin: 12px 0;
+    }
+    
+    .schedule-list {
+      margin: 15px 0;
+    }
+    
+    .schedule-item {
+      background: #222;
+      border: 1px solid #333;
+      border-radius: 8px;
+      padding: 12px;
+      margin: 8px 0;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 10px;
+    }
+    
+    .schedule-details {
+      flex: 1;
+      min-width: 200px;
+    }
+    
+    .schedule-time {
+      color: #00ff88;
+      font-weight: bold;
+      font-size: 16px;
+    }
+    
+    .schedule-days {
+      color: #ccc;
+      font-size: 12px;
+      margin: 2px 0;
+    }
+    
+    .schedule-action {
+      color: #ff6b00;
+      font-size: 12px;
+    }
+    
+    .add-schedule-form {
+      background: #222;
+      border: 1px solid #333;
+      border-radius: 8px;
+      padding: 20px;
+      margin: 15px 0;
+      display: none;
+    }
+    
+    .add-schedule-form.active {
+      display: block;
+    }
+    
+    .form-group {
+      margin: 15px 0;
+    }
+    
+    .form-label {
+      color: #00ff88;
+      display: block;
+      margin-bottom: 8px;
+      font-weight: 500;
+    }
+    
+    .time-picker {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 10px;
+      margin: 10px 0;
+    }
+    
+    .time-spinner {
+      background: #333;
+      border: 1px solid #555;
+      border-radius: 8px;
+      width: 60px;
+      padding: 10px;
+      text-align: center;
+      color: #00ff88;
+      font-size: 18px;
+      font-weight: bold;
+    }
+    
+    .spinner-controls {
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+    }
+    
+    .spinner-btn {
+      background: #333;
+      border: 1px solid #555;
+      color: #00ff88;
+      width: 30px;
+      height: 25px;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 12px;
+      padding: 0;
+      min-width: auto;
+      margin: 0;
+    }
+    
+    .spinner-btn:hover {
+      background: #444;
+    }
+    
+    .time-separator {
+      color: #00ff88;
+      font-size: 20px;
+      font-weight: bold;
+    }
+    
+    .ampm-selector {
+      background: #333;
+      border: 1px solid #555;
+      border-radius: 8px;
+      color: #00ff88;
+      padding: 10px 15px;
+      cursor: pointer;
+      font-weight: bold;
+      min-width: 50px;
+      text-align: center;
+    }
+    
+    .ampm-selector:hover {
+      background: #444;
+    }
+    
+    .day-selector {
+      display: flex;
+      justify-content: center;
+      gap: 8px;
+      margin: 15px 0;
+      flex-wrap: wrap;
+    }
+    
+    .day-btn {
+      width: 40px;
+      height: 40px;
+      border-radius: 50%;
+      border: 2px solid #555;
+      background: transparent;
+      color: #ccc;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 12px;
+      font-weight: bold;
+      margin: 2px;
+      padding: 0;
+      min-width: auto;
+    }
+    
+    .day-btn.active {
+      background: #00ff88;
+      color: #000;
+      border-color: #00ff88;
+    }
+    
+    .day-btn:hover:not(.active) {
+      border-color: #00ff88;
+      color: #00ff88;
+    }
+    
+    .action-selector {
+      display: flex;
+      gap: 10px;
+      justify-content: center;
+      margin: 15px 0;
+    }
+    
+    .action-btn {
+      padding: 12px 20px;
+      border-radius: 8px;
+      border: 2px solid #555;
+      background: transparent;
+      color: #ccc;
+      cursor: pointer;
+      min-width: 100px;
+      margin: 0;
+    }
+    
+    .action-btn.active {
+      border-color: #00ff88;
+      color: #00ff88;
+      background: rgba(0, 255, 136, 0.1);
+    }
+    
+    .action-btn:hover:not(.active) {
+      border-color: #00ff88;
+      color: #00ff88;
+    }
+    
+    @media (max-width: 600px) {
+      .container {
+        margin: 5px;
+        padding: 15px;
+      }
+      
+      button {
+        min-width: 80px;
+        padding: 10px 15px;
+        font-size: 13px;
+      }
+      
+      h1 {
+        font-size: 20px;
+      }
+      
+      .schedule-item {
+        flex-direction: column;
+        align-items: flex-start;
+      }
+      
+      .time-spinner {
+        width: 50px;
+        font-size: 16px;
+      }
+      
+      .day-btn {
+        width: 35px;
+        height: 35px;
+        font-size: 11px;
+      }
+      
+      .status-panel {
+        flex-direction: column;
+        gap: 10px;
+      }
+      
+      .status-item {
+        min-width: auto;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>Smart Curtain Controller</h1>
+
+    <div class="status-panel">
+      <div class="status-item">
+        <div class="status-label">System Status</div>
+        <div class="status-value" id="systemStatus">{SYSTEM_STATUS}</div>
+      </div>
+      <div class="status-item">
+        <div class="status-label">Curtain Position</div>
+        <div class="status-value" id="curtainPosition">{CURTAIN_POSITION}</div>
+      </div>
+      <div class="status-item">
+        <div class="status-label">Connection</div>
+        <div class="status-value" id="connectionStatus">{CONNECTION_STATUS}</div>
+      </div>
+    </div>
+
+    <div class="section">
+      <h3>Curtain Control</h3>
+      <div class="button-group">
+        <button type="button" class="btn-up" onclick="openCurtain()">UP OPEN CURTAIN</button>
+        <button type="button" class="btn-down" onclick="closeCurtain()">DOWN CLOSE CURTAIN</button>
+      </div>
+      <div class="button-group">
+        <button type="button" class="btn-home" onclick="homeMotor()">HOME</button>
+        <button type="button" class="btn-stop" onclick="stopMotor()">EMERGENCY STOP</button>
+      </div>
+      <p><small>OPEN = Go to home sensor | CLOSE = Go to saved position</small></p>
+    </div>
+
+    <div class="section">
+      <h3>Schedule Management</h3>
+      
+      <div class="button-group">
+        <button type="button" class="btn-add" onclick="toggleAddSchedule()">ADD NEW SCHEDULE</button>
+      </div>
+
+      <div class="add-schedule-form" id="addScheduleForm">
+        <div class="form-group">
+          <label class="form-label">Set Time</label>
+          <div class="time-picker">
+            <div class="spinner-controls">
+              <button type="button" class="spinner-btn" onclick="changeTime('hour', 1)">+</button>
+              <button type="button" class="spinner-btn" onclick="changeTime('hour', -1)">-</button>
+            </div>
+            <div class="time-spinner" id="hourSpinner">12</div>
+            <div class="time-separator">:</div>
+            <div class="spinner-controls">
+              <button type="button" class="spinner-btn" onclick="changeTime('minute', 1)">+</button>
+              <button type="button" class="spinner-btn" onclick="changeTime('minute', -1)">-</button>
+            </div>
+            <div class="time-spinner" id="minuteSpinner">00</div>
+            <div class="ampm-selector" id="ampmSelector" onclick="toggleAMPM()">AM</div>
+          </div>
+        </div>
+
+        <div class="form-group">
+          <label class="form-label">Select Days</label>
+          <div class="day-selector">
+            <button type="button" class="day-btn" data-day="0" onclick="toggleDay(0)">S</button>
+            <button type="button" class="day-btn" data-day="1" onclick="toggleDay(1)">M</button>
+            <button type="button" class="day-btn" data-day="2" onclick="toggleDay(2)">T</button>
+            <button type="button" class="day-btn" data-day="3" onclick="toggleDay(3)">W</button>
+            <button type="button" class="day-btn" data-day="4" onclick="toggleDay(4)">T</button>
+            <button type="button" class="day-btn" data-day="5" onclick="toggleDay(5)">F</button>
+            <button type="button" class="day-btn" data-day="6" onclick="toggleDay(6)">S</button>
+          </div>
+        </div>
+
+        <div class="form-group">
+          <label class="form-label">Action</label>
+          <div class="action-selector">
+            <button type="button" class="action-btn" data-action="open" onclick="selectAction('open')">UP OPEN</button>
+            <button type="button" class="action-btn" data-action="close" onclick="selectAction('close')">DOWN CLOSE</button>
+          </div>
+        </div>
+
+        <div class="button-group">
+          <button type="button" class="btn-save" onclick="saveSchedule()">SAVE SCHEDULE</button>
+          <button type="button" class="btn-stop" onclick="cancelAddSchedule()">CANCEL</button>
+        </div>
+      </div>
+
+      <div class="schedule-list" id="scheduleList">
+        {SCHEDULE_LIST}
+      </div>
+    </div>
+
+    <div class="section">
+      <h3>Manual Control</h3>
+      <div class="button-group">
+        <button type="button" class="btn-up" onclick="manualMove('up')">UP</button>
+        <button type="button" class="btn-down" onclick="manualMove('down')">DOWN</button>
+        <button type="button" class="btn-stop" onclick="stopMotor()">STOP</button>
+      </div>
+      <div class="button-group">
+        <button type="button" class="btn-save" onclick="savePosition()">SAVE CLOSED</button>
+      </div>
+      <p><small>Move to desired position and save as closed position</small></p>
+    </div>
+  </div>
+
+  <script>
+    let currentHour = 12;
+    let currentMinute = 0;
+    let currentAMPM = 'AM';
+    let selectedDays = [];
+    let selectedAction = '';
+
+    function homeMotor() {
+      const btn = event.target;
+      btn.disabled = true;
+      btn.innerHTML = 'HOMING...';
+      
+      fetch('/control', { 
+        method: 'POST', 
+        headers: {'Content-Type': 'application/x-www-form-urlencoded'}, 
+        body: 'action=home' 
+      }).then(() => {
+        setTimeout(() => location.reload(), 5000);
+      }).catch(() => {
+        btn.disabled = false;
+        btn.innerHTML = 'HOME';
+      });
+    }
+
+    function manualMove(direction) {
+      fetch('/control', { 
+        method: 'POST', 
+        headers: {'Content-Type': 'application/x-www-form-urlencoded'}, 
+        body: 'action=manual&direction=' + direction 
+      }).then(() => {
+        setTimeout(() => location.reload(), 2000);
+      });
+    }
+
+    function savePosition() {
+      if(confirm('Save current position as CLOSED position?')) {
+        fetch('/control', { 
+          method: 'POST', 
+          headers: {'Content-Type': 'application/x-www-form-urlencoded'}, 
+          body: 'action=save' 
+        }).then(() => {
+          setTimeout(() => location.reload(), 1000);
+        });
+      }
+    }
+
+    function openCurtain() {
+      const btn = event.target;
+      btn.disabled = true;
+      btn.innerHTML = 'OPENING...';
+      
+      fetch('/control', { 
+        method: 'POST', 
+        headers: {'Content-Type': 'application/x-www-form-urlencoded'}, 
+        body: 'action=open' 
+      }).then(() => {
+        setTimeout(() => location.reload(), 5000);
+      }).catch(() => {
+        btn.disabled = false;
+        btn.innerHTML = 'UP OPEN CURTAIN';
+      });
+    }
+
+    function closeCurtain() {
+      const btn = event.target;
+      btn.disabled = true;
+      btn.innerHTML = 'CLOSING...';
+      
+      fetch('/control', { 
+        method: 'POST', 
+        headers: {'Content-Type': 'application/x-www-form-urlencoded'}, 
+        body: 'action=close' 
+      }).then(() => {
+        setTimeout(() => location.reload(), 8000);
+      }).catch(() => {
+        btn.disabled = false;
+        btn.innerHTML = 'DOWN CLOSE CURTAIN';
+      });
+    }
+
+    function stopMotor() {
+      fetch('/control', { 
+        method: 'POST', 
+        headers: {'Content-Type': 'application/x-www-form-urlencoded'}, 
+        body: 'action=stop' 
+      });
+    }
+
+    function toggleAddSchedule() {
+      const form = document.getElementById('addScheduleForm');
+      form.classList.toggle('active');
+      if (form.classList.contains('active')) {
+        resetForm();
+      }
+    }
+
+    function cancelAddSchedule() {
+      document.getElementById('addScheduleForm').classList.remove('active');
+    }
+
+    function resetForm() {
+      currentHour = 12;
+      currentMinute = 0;
+      currentAMPM = 'AM';
+      selectedDays = [];
+      selectedAction = '';
+      updateTimeDisplay();
+      updateDayButtons();
+      updateActionButtons();
+    }
+
+    function changeTime(type, delta) {
+      if (type === 'hour') {
+        currentHour += delta;
+        if (currentHour > 12) currentHour = 1;
+        if (currentHour < 1) currentHour = 12;
+      } else if (type === 'minute') {
+        const intervals = [0, 15, 30, 45];
+        let currentIndex = intervals.indexOf(currentMinute);
+        
+        if (delta > 0) {
+          currentIndex = (currentIndex + 1) % intervals.length;
+        } else {
+          currentIndex = (currentIndex - 1 + intervals.length) % intervals.length;
+        }
+        
+        currentMinute = intervals[currentIndex];
+      }
+      updateTimeDisplay();
+    }
+
+    function toggleAMPM() {
+      currentAMPM = currentAMPM === 'AM' ? 'PM' : 'AM';
+      updateTimeDisplay();
+    }
+
+    function updateTimeDisplay() {
+      document.getElementById('hourSpinner').textContent = currentHour.toString().padStart(2, '0');
+      document.getElementById('minuteSpinner').textContent = currentMinute.toString().padStart(2, '0');
+      document.getElementById('ampmSelector').textContent = currentAMPM;
+    }
+
+    function toggleDay(day) {
+      const index = selectedDays.indexOf(day);
+      if (index > -1) {
+        selectedDays.splice(index, 1);
+      } else {
+        selectedDays.push(day);
+      }
+      updateDayButtons();
+    }
+
+    function updateDayButtons() {
+      document.querySelectorAll('.day-btn').forEach((btn, index) => {
+        if (selectedDays.includes(index)) {
+          btn.classList.add('active');
+        } else {
+          btn.classList.remove('active');
+        }
+      });
+    }
+
+    function selectAction(action) {
+      selectedAction = action;
+      updateActionButtons();
+    }
+
+    function updateActionButtons() {
+      document.querySelectorAll('.action-btn').forEach(btn => {
+        if (btn.dataset.action === selectedAction) {
+          btn.classList.add('active');
+        } else {
+          btn.classList.remove('active');
+        }
+      });
+    }
+
+    function saveSchedule() {
+      if (selectedDays.length === 0) {
+        alert('Please select at least one day');
+        return;
+      }
+      if (!selectedAction) {
+        alert('Please select an action');
+        return;
+      }
+
+      const scheduleData = {
+        hour: currentHour,
+        minute: currentMinute,
+        ampm: currentAMPM,
+        days: selectedDays.join(','),
+        action: selectedAction
+      };
+
+      const params = new URLSearchParams(scheduleData);
+      params.append('action', 'add_schedule');
+
+      fetch('/control', { 
+        method: 'POST', 
+        headers: {'Content-Type': 'application/x-www-form-urlencoded'}, 
+        body: params.toString()
+      }).then(() => {
+        cancelAddSchedule();
+        setTimeout(() => location.reload(), 1000);
+      }).catch(err => {
+        alert('Failed to save schedule: ' + err);
+      });
+    }
+
+    function deleteSchedule(index) {
+      if (confirm('Delete this schedule?')) {
+        fetch('/control', { 
+          method: 'POST', 
+          headers: {'Content-Type': 'application/x-www-form-urlencoded'}, 
+          body: `action=delete_schedule&index=${index}`
+        }).then(() => {
+          setTimeout(() => location.reload(), 500);
+        });
+      }
+    }
+
+    document.addEventListener('DOMContentLoaded', function() {
+      updateTimeDisplay();
+    });
+  </script>
+</body>
+</html>

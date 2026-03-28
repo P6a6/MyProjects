@@ -1,0 +1,369 @@
+#include <Arduino.h>
+#include <WiFi.h>
+#include <WebServer.h>
+#include <EEPROM.h>
+
+// Function declarations
+void runMotorSteps(int steps, int delayMicros, bool direction, bool checkSensor = false);
+void handleRoot();
+void handleControl();
+void autoHome();
+void moveToPosition(int targetPosition);
+
+// Pin definitions
+#define STEP_PIN 2
+#define DIR_PIN 4
+#define EN_PIN 16
+#define HOME_SENSOR_PIN 18
+
+// WiFi credentials - REPLACE WITH YOUR CREDENTIALS
+const char* ssid = "VM6159022";
+const char* password = "rcgc4yyYdfrt";
+
+// Web server
+WebServer server(80);
+
+// System state
+int currentPosition = 0;        // Current position in steps from home
+int closedPosition = 0;         // Fully closed position (saved in EEPROM)
+bool motorRunning = false;
+bool isHomed = false;
+
+// Constants
+const int HOMING_TIMEOUT_MS = 20000;     // 15 seconds timeout
+const int HOMING_SPEED_DELAY = 2000;     // Very slow speed for homing (microseconds)
+const int NORMAL_SPEED_DELAY = 2000;     // Much slower for normal operation
+const int HEAVY_LOAD_DELAY = 3000;      // Extra slow for starting from closed position
+const int MANUAL_STEP_SIZE = 300;        // Smaller steps for manual control
+const int EEPROM_ADDRESS = 0;            // Address to store closed position
+
+void setup() {
+  Serial.begin(115200);
+  EEPROM.begin(512);
+  
+  // Set pin modes
+  pinMode(STEP_PIN, OUTPUT);
+  pinMode(DIR_PIN, OUTPUT);
+  pinMode(EN_PIN, OUTPUT);
+  pinMode(HOME_SENSOR_PIN, INPUT_PULLUP);  // Pull-up for inverted sensor logic
+  
+  // Initialize pins
+  digitalWrite(STEP_PIN, LOW);
+  digitalWrite(DIR_PIN, HIGH);
+  digitalWrite(EN_PIN, LOW); // Enable motor
+  
+  Serial.println("Smart Curtain System Starting...");
+  
+  // Debug sensor reading
+  Serial.print("Home sensor reading: ");
+  Serial.println(digitalRead(HOME_SENSOR_PIN) ? "HIGH (clear)" : "LOW (triggered)");
+  
+  // Load saved closed position from EEPROM
+  EEPROM.get(EEPROM_ADDRESS, closedPosition);
+  if (closedPosition < 0 || closedPosition > 50000) {
+    closedPosition = 0; // Reset if invalid data
+  }
+  Serial.println("Loaded closed position: " + String(closedPosition) + " steps");
+  
+  // Connect to WiFi
+  WiFi.begin(ssid, password);
+  Serial.print("Connecting to WiFi");
+  
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+  
+  Serial.println("");
+  Serial.println("WiFi connected!");
+  Serial.print("IP address: ");
+  Serial.println(WiFi.localIP());
+  
+  // Setup web server routes
+  server.on("/", handleRoot);
+  server.on("/control", HTTP_POST, handleControl);
+  
+  // Start server
+  server.begin();
+  Serial.println("Web server started!");
+  Serial.println("Go to: http://" + WiFi.localIP().toString());
+  
+  // Auto-home on startup
+  Serial.println("Starting auto-homing sequence...");
+  autoHome();
+}
+
+void loop() {
+  server.handleClient();
+}
+
+void autoHome() {
+  Serial.println("AUTO-HOMING: Moving up to find home sensor...");
+  
+  // Debug current sensor state
+  bool sensorState = digitalRead(HOME_SENSOR_PIN);
+  Serial.println("Current sensor reading: " + String(sensorState ? "HIGH (clear)" : "LOW (triggered)"));
+  
+  // Check if already at home (sensor triggered = LOW)
+  if (sensorState == LOW) {
+    Serial.println("Already at home position!");
+    currentPosition = 0;
+    isHomed = true;
+    return;
+  }
+  
+  digitalWrite(DIR_PIN, HIGH); // Move up
+  
+  unsigned long startTime = millis();
+  int stepCount = 0;
+  
+  // Move up until sensor triggers (goes LOW) or timeout
+  while (digitalRead(HOME_SENSOR_PIN) == HIGH) {
+    // Check timeout
+    if (millis() - startTime > HOMING_TIMEOUT_MS) {
+      Serial.println("HOMING TIMEOUT! Stopping motor.");
+      return;
+    }
+    
+    // Take one step
+    digitalWrite(STEP_PIN, HIGH);
+    delayMicroseconds(50);
+    digitalWrite(STEP_PIN, LOW);
+    delayMicroseconds(HOMING_SPEED_DELAY);
+    
+    stepCount++;
+    
+    // Debug sensor reading every 200 steps
+    if (stepCount % 200 == 0) {
+      Serial.println("Homing step " + String(stepCount) + ", Sensor: " + String(digitalRead(HOME_SENSOR_PIN) ? "HIGH (clear)" : "LOW (triggered)"));
+    }
+    
+    // Handle web requests occasionally
+    if (stepCount % 100 == 0) {
+      server.handleClient();
+    }
+  }
+  
+  // Home sensor triggered!
+  Serial.println("HOME DETECTED! Stopped at home position.");
+  currentPosition = 0;
+  isHomed = true;
+}
+
+void handleRoot() {
+  String html = "<!DOCTYPE html><html><head>";
+  html += "<title>Smart Curtain Controller</title>";
+  html += "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">";
+  html += "<style>";
+  html += "body { font-family: Arial; margin: 20px; background: #f0f0f0; }";
+  html += ".container { max-width: 600px; margin: 0 auto; background: white; padding: 20px; border-radius: 10px; }";
+  html += "h1 { color: #333; text-align: center; }";
+  html += ".section { margin: 20px 0; padding: 15px; border: 1px solid #ddd; border-radius: 5px; }";
+  html += "button { padding: 15px 25px; margin: 10px; font-size: 18px; border-radius: 5px; border: none; cursor: pointer; }";
+  html += ".btn-up { background: #4CAF50; color: white; }";
+  html += ".btn-down { background: #f44336; color: white; }";
+  html += ".btn-stop { background: #ff9800; color: white; }";
+  html += ".btn-save { background: #2196F3; color: white; }";
+  html += ".btn-home { background: #9C27B0; color: white; }";
+  html += "button:hover { opacity: 0.8; }";
+  html += ".info { background: #e8f5e8; padding: 15px; border-radius: 5px; margin: 10px 0; }";
+  html += "</style></head><body>";
+  
+  html += "<div class=\"container\">";
+  html += "<h1>Smart Curtain Controller</h1>";
+  
+  html += "<div class=\"info\">";
+  html += "<strong>Current Position:</strong> " + String(currentPosition) + " steps from home<br>";
+  html += "<strong>Closed Position:</strong> " + String(closedPosition) + " steps<br>";
+  html += "<strong>Homed:</strong> " + String(isHomed ? "YES" : "NO") + "<br>";
+  html += "<strong>Home Sensor:</strong> " + String(digitalRead(HOME_SENSOR_PIN) ? "HIGH (clear)" : "LOW (TRIGGERED)") + "<br>";
+  
+  // Show current speed mode
+  if (closedPosition > 0 && currentPosition >= (closedPosition * 0.8)) {
+    html += "<strong>Speed Mode:</strong> HEAVY LOAD (Extra Slow for Max Torque)";
+  } else {
+    html += "<strong>Speed Mode:</strong> NORMAL";
+  }
+  html += "</div>";
+
+  // Homing section
+  html += "<div class=\"section\">";
+  html += "<h3>Homing Control</h3>";
+  html += "<button class=\"btn-home\" onclick=\"homeMotor()\">GO TO HOME POSITION</button>";
+  html += "</div>";
+
+  // Manual control section
+  html += "<div class=\"section\">";
+  html += "<h3>Manual Control (Calibration)</h3>";
+  html += "<button class=\"btn-up\" onclick=\"manualMove('up')\">UP (Big Steps)</button>";
+  html += "<button class=\"btn-down\" onclick=\"manualMove('down')\">DOWN (Big Steps)</button>";
+  html += "<button class=\"btn-stop\" onclick=\"stopMotor()\">STOP</button><br>";
+  html += "<button class=\"btn-save\" onclick=\"savePosition()\">SAVE CURRENT AS CLOSED POSITION</button>";
+  html += "<p>Move curtain to desired closed position, then click SAVE</p>";
+  html += "</div>";
+
+  // Normal operation section
+  html += "<div class=\"section\">";
+  html += "<h3>Curtain Control</h3>";
+  html += "<button class=\"btn-up\" onclick=\"openCurtain()\">OPEN CURTAIN</button>";
+  html += "<button class=\"btn-down\" onclick=\"closeCurtain()\">CLOSE CURTAIN</button>";
+  html += "<button class=\"btn-stop\" onclick=\"stopMotor()\">EMERGENCY STOP</button>";
+  html += "</div>";
+
+  html += "</div>";
+
+  html += "<script>";
+  html += "function homeMotor() {";
+  html += "  fetch('/control', { method: 'POST', headers: {'Content-Type': 'application/x-www-form-urlencoded'}, body: 'action=home' });";
+  html += "  setTimeout(() => location.reload(), 3000);";
+  html += "}";
+  html += "function manualMove(direction) {";
+  html += "  fetch('/control', { method: 'POST', headers: {'Content-Type': 'application/x-www-form-urlencoded'}, body: 'action=manual&direction=' + direction });";
+  html += "  setTimeout(() => location.reload(), 2000);";
+  html += "}";
+  html += "function savePosition() {";
+  html += "  if(confirm('Save current position as CLOSED position?')) {";
+  html += "    fetch('/control', { method: 'POST', headers: {'Content-Type': 'application/x-www-form-urlencoded'}, body: 'action=save' });";
+  html += "    setTimeout(() => location.reload(), 1000);";
+  html += "  }";
+  html += "}";
+  html += "function openCurtain() {";
+  html += "  fetch('/control', { method: 'POST', headers: {'Content-Type': 'application/x-www-form-urlencoded'}, body: 'action=open' });";
+  html += "}";
+  html += "function closeCurtain() {";
+  html += "  fetch('/control', { method: 'POST', headers: {'Content-Type': 'application/x-www-form-urlencoded'}, body: 'action=close' });";
+  html += "}";
+  html += "function stopMotor() {";
+  html += "  fetch('/control', { method: 'POST', headers: {'Content-Type': 'application/x-www-form-urlencoded'}, body: 'action=stop' });";
+  html += "}";
+  html += "</script>";
+
+  html += "</body></html>";
+
+  server.send(200, "text/html", html);
+}
+
+void handleControl() {
+  if (!server.hasArg("action")) {
+    server.send(400, "text/plain", "No action specified");
+    return;
+  }
+  
+  String action = server.arg("action");
+  Serial.println("Command received: " + action);
+  
+  if (action == "stop") {
+    motorRunning = false;
+    Serial.println("EMERGENCY STOP");
+  }
+  else if (action == "home") {
+    Serial.println("Starting homing sequence...");
+    autoHome();
+  }
+  else if (action == "manual" && server.hasArg("direction")) {
+    String direction = server.arg("direction");
+    Serial.println("Manual move: " + direction);
+    
+    // Choose speed based on current position
+    int speedDelay = NORMAL_SPEED_DELAY;
+    if (currentPosition >= (closedPosition * 0.8) && direction == "up") {
+      speedDelay = HEAVY_LOAD_DELAY;
+      Serial.println("Using HEAVY LOAD speed for manual UP from closed position");
+    }
+    
+    if (direction == "up") {
+      digitalWrite(DIR_PIN, HIGH);
+      runMotorSteps(MANUAL_STEP_SIZE, speedDelay, true, true);
+      currentPosition = max(0, currentPosition - MANUAL_STEP_SIZE);
+    } else if (direction == "down") {
+      digitalWrite(DIR_PIN, LOW);
+      runMotorSteps(MANUAL_STEP_SIZE, NORMAL_SPEED_DELAY, false, false);
+      currentPosition += MANUAL_STEP_SIZE;
+    }
+  }
+  else if (action == "save") {
+    if (currentPosition > 50) { // Prevent saving home as closed position
+      closedPosition = currentPosition;
+      EEPROM.put(EEPROM_ADDRESS, closedPosition);
+      EEPROM.commit();
+      Serial.println("Saved closed position: " + String(closedPosition) + " steps");
+    } else {
+      Serial.println("ERROR: Cannot save closed position - too close to home!");
+    }
+  }
+  else if (action == "open") {
+    Serial.println("Opening curtain - going to home position");
+    moveToPosition(0); // Go to home
+  }
+  else if (action == "close" && closedPosition > 0) {
+    Serial.println("Closing curtain - going to closed position");
+    moveToPosition(closedPosition); // Go to closed position
+  }
+  else {
+    Serial.println("Unknown or invalid command: " + action);
+  }
+  
+  server.send(200, "text/plain", "OK");
+}
+
+void moveToPosition(int targetPosition) {
+  if (targetPosition == currentPosition) {
+    Serial.println("Already at target position");
+    return;
+  }
+  
+  int stepsToMove = abs(targetPosition - currentPosition);
+  bool moveUp = (targetPosition < currentPosition);
+  
+  Serial.println("Moving to position " + String(targetPosition) + " (currently at " + String(currentPosition) + ")");
+  Serial.println("Steps to move: " + String(stepsToMove) + ", Direction: " + String(moveUp ? "UP" : "DOWN"));
+  
+  // Use slower speed if starting from closed position (heavy load)
+  int speedDelay = NORMAL_SPEED_DELAY;
+  if (currentPosition >= (closedPosition * 0.8) && moveUp) {
+    speedDelay = HEAVY_LOAD_DELAY;
+    Serial.println("Using HEAVY LOAD speed (extra slow) - starting from closed position");
+  }
+  
+  digitalWrite(DIR_PIN, moveUp ? HIGH : LOW);
+  runMotorSteps(stepsToMove, speedDelay, moveUp, moveUp);
+  
+  currentPosition = targetPosition;
+  Serial.println("Movement complete. New position: " + String(currentPosition));
+}
+
+void runMotorSteps(int steps, int delayMicros, bool direction, bool checkSensor) {
+  digitalWrite(DIR_PIN, direction ? HIGH : LOW);
+  motorRunning = true;
+  
+  Serial.println("Running " + String(steps) + " steps, direction: " + String(direction ? "UP" : "DOWN"));
+  Serial.println("Speed: " + String(delayMicros) + " microseconds delay");
+  
+  for(int i = 0; i < steps && motorRunning; i++) {
+    // Check home sensor if moving up (sensor triggered = LOW)
+    if (checkSensor && digitalRead(HOME_SENSOR_PIN) == LOW) {
+      Serial.println("Home sensor triggered during movement - stopping");
+      Serial.println("Sensor reading: LOW (triggered)");
+      currentPosition = 0;
+      break;
+    }
+    
+    // Debug sensor every 100 steps when checking
+    if (checkSensor && i % 100 == 0) {
+      Serial.println("Step " + String(i) + ", Sensor: " + String(digitalRead(HOME_SENSOR_PIN) ? "HIGH (clear)" : "LOW (triggered)"));
+    }
+    
+    digitalWrite(STEP_PIN, HIGH);
+    delayMicroseconds(50);
+    digitalWrite(STEP_PIN, LOW);
+    delayMicroseconds(delayMicros);
+    
+    // Handle web requests every 100 steps
+    if(i % 100 == 0) {
+      server.handleClient();
+    }
+  }
+  
+  motorRunning = false;
+  Serial.println("Motor movement finished");
+}

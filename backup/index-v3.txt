@@ -1,0 +1,177 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Smart Curtain Controller</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    body { 
+      font-family: Arial; 
+      margin: 20px; 
+      background: #f0f0f0; 
+    }
+    .container { 
+      max-width: 600px; 
+      margin: 0 auto; 
+      background: white; 
+      padding: 20px; 
+      border-radius: 10px; 
+    }
+    h1 { 
+      color: #333; 
+      text-align: center; 
+    }
+    .section { 
+      margin: 20px 0; 
+      padding: 15px; 
+      border: 1px solid #ddd; 
+      border-radius: 5px; 
+    }
+    button { 
+      padding: 15px 25px; 
+      margin: 10px; 
+      font-size: 18px; 
+      border-radius: 5px; 
+      border: none; 
+      cursor: pointer; 
+    }
+    .btn-up { 
+      background: #4CAF50; 
+      color: white; 
+    }
+    .btn-down { 
+      background: #f44336; 
+      color: white; 
+    }
+    .btn-stop { 
+      background: #ff9800; 
+      color: white; 
+    }
+    .btn-save { 
+      background: #2196F3; 
+      color: white; 
+    }
+    .btn-home { 
+      background: #9C27B0; 
+      color: white; 
+    }
+    button:hover { 
+      opacity: 0.8; 
+    }
+    .info { 
+      background: #e8f5e8; 
+      padding: 15px; 
+      border-radius: 5px; 
+      margin: 10px 0; 
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>Smart Curtain Controller</h1>
+
+    <div class="info">
+      <strong>Current Position:</strong> {CURRENT_POSITION} steps from home<br>
+      <strong>Closed Position:</strong> {CLOSED_POSITION} steps<br>
+      <strong>Homed:</strong> {IS_HOMED}<br>
+      <strong>Position Status:</strong> {POSITION_STATUS}<br>
+      <strong>Home Sensor:</strong> {HOME_SENSOR}<br>
+      <strong>Speed Mode:</strong> {SPEED_MODE}
+    </div>
+
+    <!-- Homing section -->
+    <div class="section">
+      <h3>Homing Control</h3>
+      <button class="btn-home" onclick="homeMotor()">GO TO HOME POSITION</button>
+      <p><small>Moves up until home sensor is detected</small></p>
+    </div>
+
+    <!-- Manual control section -->
+    <div class="section">
+      <h3>Manual Control (Calibration)</h3>
+      <button class="btn-up" onclick="manualMove('up')">UP (Big Steps)</button>
+      <button class="btn-down" onclick="manualMove('down')">DOWN (Big Steps)</button>
+      <button class="btn-stop" onclick="stopMotor()">STOP</button><br>
+      <button class="btn-save" onclick="savePosition()">SAVE CURRENT AS CLOSED POSITION</button>
+      <p>Move curtain to desired closed position, then click SAVE</p>
+    </div>
+
+    <!-- Normal operation section -->
+    <div class="section">
+      <h3>Curtain Control</h3>
+      <button class="btn-up" onclick="openCurtain()">OPEN CURTAIN</button>
+      <button class="btn-down" onclick="closeCurtain()">CLOSE CURTAIN</button>
+      <button class="btn-stop" onclick="stopMotor()">EMERGENCY STOP</button>
+      <p><small>OPEN = Go to home sensor position | CLOSE = Go to saved position</small></p>
+    </div>
+  </div>
+
+  <script>
+    function homeMotor() {
+      // Disable button to prevent double-clicks
+      document.querySelector('.btn-home').disabled = true;
+      document.querySelector('.btn-home').innerHTML = 'HOMING...';
+      
+      fetch('/control', { 
+        method: 'POST', 
+        headers: {'Content-Type': 'application/x-www-form-urlencoded'}, 
+        body: 'action=home' 
+      });
+      setTimeout(() => location.reload(), 5000); // Longer timeout for homing
+    }
+
+    function manualMove(direction) {
+      fetch('/control', { 
+        method: 'POST', 
+        headers: {'Content-Type': 'application/x-www-form-urlencoded'}, 
+        body: 'action=manual&direction=' + direction 
+      });
+      setTimeout(() => location.reload(), 2000);
+    }
+
+    function savePosition() {
+      if(confirm('Save current position as CLOSED position?')) {
+        fetch('/control', { 
+          method: 'POST', 
+          headers: {'Content-Type': 'application/x-www-form-urlencoded'}, 
+          body: 'action=save' 
+        });
+        setTimeout(() => location.reload(), 1000);
+      }
+    }
+
+    function openCurtain() {
+      // Disable button to prevent double-clicks
+      event.target.disabled = true;
+      event.target.innerHTML = 'OPENING...';
+      
+      fetch('/control', { 
+        method: 'POST', 
+        headers: {'Content-Type': 'application/x-www-form-urlencoded'}, 
+        body: 'action=open' 
+      });
+      setTimeout(() => location.reload(), 5000); // Same timeout as homing
+    }
+
+    function closeCurtain() {
+      // Disable button to prevent double-clicks
+      event.target.disabled = true;
+      event.target.innerHTML = 'CLOSING...';
+      
+      fetch('/control', { 
+        method: 'POST', 
+        headers: {'Content-Type': 'application/x-www-form-urlencoded'}, 
+        body: 'action=close' 
+      });
+      setTimeout(() => location.reload(), 8000); // Longer timeout for closing
+    }
+
+    function stopMotor() {
+      fetch('/control', { 
+        method: 'POST', 
+        headers: {'Content-Type': 'application/x-www-form-urlencoded'}, 
+        body: 'action=stop' 
+      });
+    }
+  </script>
+</body>
+</html>

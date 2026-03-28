@@ -1,0 +1,412 @@
+#include <Arduino.h>
+#include <WiFi.h>
+#include <WebServer.h>
+#include <EEPROM.h>
+#include <SPIFFS.h>
+
+// Function declarations
+void runMotorSteps(int steps, int delayMicros, bool direction, bool checkSensor = false);
+void handleRoot();
+void handleControl();
+void autoHome();
+void moveToPosition(int targetPosition);
+
+// Pin definitions
+#define STEP_PIN 2
+#define DIR_PIN 4
+#define EN_PIN 16
+#define HOME_SENSOR_PIN 18
+
+// WiFi credentials - REPLACE WITH YOUR CREDENTIALS
+const char* ssid = "VM6159022";
+const char* password = "rcgc4yyYdfrt";
+// Web server
+WebServer server(80);
+
+// System state
+int currentPosition = 0;        // Current position in steps from home
+int closedPosition = 0;         // Fully closed position (saved in EEPROM)
+bool motorRunning = false;
+bool isHomed = false;
+bool positionLost = false;      // Track if position is unreliable after emergency stop
+
+// Constants
+const int HOMING_TIMEOUT_MS = 90000;     // 90 seconds for extreme power loss recovery
+const int HOMING_SPEED_DELAY = 2000;     // Very slow speed for homing (microseconds)
+const int NORMAL_SPEED_DELAY = 2000;     // Much slower for normal operation
+const int HEAVY_LOAD_DELAY = 3000;      // Extra slow for starting from closed position
+const int MANUAL_STEP_SIZE = 300;        // Smaller steps for manual control
+const int EEPROM_ADDRESS = 0;            // Address to store closed position
+
+void setup() {
+  Serial.begin(115200);
+  EEPROM.begin(512);
+
+  // Initialize SPIFFS
+  if (!SPIFFS.begin(true)) {
+    Serial.println("SPIFFS Mount Failed");
+    return;
+  } else {
+    Serial.println("SPIFFS Mount Successful");
+    if (SPIFFS.exists("/index.html")) {
+      Serial.println("index.html found!");
+    } else {
+      Serial.println("index.html NOT found!");
+    }
+  }
+
+  // Set pin modes
+  pinMode(STEP_PIN, OUTPUT);
+  pinMode(DIR_PIN, OUTPUT);
+  pinMode(EN_PIN, OUTPUT);
+  pinMode(HOME_SENSOR_PIN, INPUT_PULLUP);  // Pull-up for sensor
+
+  // Initialize pins
+  digitalWrite(STEP_PIN, LOW);
+  digitalWrite(DIR_PIN, HIGH);
+  digitalWrite(EN_PIN, LOW); // Enable motor
+
+  Serial.println("Smart Curtain System Starting…");
+
+  // Debug sensor reading
+  Serial.print("Home sensor reading: ");
+  Serial.println(digitalRead(HOME_SENSOR_PIN) ? "HIGH (triggered)" : "LOW (clear)");
+
+  // Load saved closed position from EEPROM
+  EEPROM.get(EEPROM_ADDRESS, closedPosition);
+  if (closedPosition < 0 || closedPosition > 50000) {
+    closedPosition = 0; // Reset if invalid data
+  }
+  Serial.println("Loaded closed position: " + String(closedPosition) + " steps");
+
+  // Connect to WiFi
+  WiFi.begin(ssid, password);
+  Serial.print("Connecting to WiFi");
+
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+
+  Serial.println("");
+  Serial.println("WiFi connected!");
+  Serial.print("IP address: ");
+  Serial.println(WiFi.localIP());
+
+  // Setup web server routes
+  server.on("/", handleRoot);
+  server.on("/control", HTTP_POST, handleControl);
+  
+  // Serve static files from SPIFFS
+  server.onNotFound([]() {
+    String path = server.uri();
+    if (path.endsWith("/")) path += "index.html";
+    
+    String contentType = "text/plain";
+    if (path.endsWith(".html")) contentType = "text/html";
+    else if (path.endsWith(".css")) contentType = "text/css";
+    else if (path.endsWith(".js")) contentType = "application/javascript";
+    
+    if (SPIFFS.exists(path)) {
+      File file = SPIFFS.open(path, "r");
+      server.streamFile(file, contentType);
+      file.close();
+    } else {
+      server.send(404, "text/plain", "File not found");
+    }
+  });
+
+  // Start server
+  server.begin();
+  Serial.println("Web server started!");
+  Serial.println("Go to: http://" + WiFi.localIP().toString());
+
+  // Auto-home on startup
+  Serial.println("Starting auto-homing sequence…");
+  autoHome();
+}
+
+void loop() {
+  server.handleClient();
+}
+
+void autoHome() {
+  Serial.println("=== STARTING RELIABLE HOMING ===");
+  
+  // COMPLETELY stop all other operations
+  motorRunning = false;
+  delay(500); // Give everything time to stop
+  
+  // Check sensor first
+  bool initialSensor = digitalRead(HOME_SENSOR_PIN);
+  Serial.println("Initial sensor state: " + String(initialSensor ? "HIGH" : "LOW"));
+  
+  if (initialSensor == HIGH) {
+    Serial.println("Already at home!");
+    currentPosition = 0;
+    isHomed = true;
+    positionLost = false;
+    return;
+  }
+  
+  Serial.println("Moving up to find home sensor - NO INTERRUPTIONS ALLOWED");
+  
+  // Set direction
+  digitalWrite(DIR_PIN, HIGH); // Move up
+  
+  unsigned long startTime = millis();
+  int stepCount = 0;
+  int consecutiveHighReadings = 0; // For sensor filtering
+  const int SENSOR_CONFIRM_COUNT = 5; // Need 5 consecutive HIGH readings
+  
+  // SIMPLE LOOP - No web handling, no interruptions except timeout
+  while (true) {
+    // ONLY check timeout
+    if (millis() - startTime > HOMING_TIMEOUT_MS) {
+      Serial.println("=== TIMEOUT REACHED ===");
+      Serial.println("Steps taken: " + String(stepCount));
+      Serial.println("Time elapsed: " + String((millis() - startTime)/1000) + " seconds");
+      Serial.println("Final sensor: " + String(digitalRead(HOME_SENSOR_PIN) ? "HIGH" : "LOW"));
+      positionLost = true;
+      return;
+    }
+    
+    // Take one step
+    digitalWrite(STEP_PIN, HIGH);
+    delayMicroseconds(50);
+    digitalWrite(STEP_PIN, LOW);
+    delayMicroseconds(HOMING_SPEED_DELAY);
+    
+    stepCount++;
+    
+    // Check sensor with filtering to avoid noise
+    bool sensorReading = digitalRead(HOME_SENSOR_PIN);
+    
+    if (sensorReading == HIGH) {
+      consecutiveHighReadings++;
+      if (consecutiveHighReadings >= SENSOR_CONFIRM_COUNT) {
+        Serial.println("=== HOME SENSOR CONFIRMED ===");
+        Serial.println("Steps taken: " + String(stepCount));
+        Serial.println("Consecutive HIGH readings: " + String(consecutiveHighReadings));
+        currentPosition = 0;
+        isHomed = true;
+        positionLost = false;
+        return;
+      }
+    } else {
+      consecutiveHighReadings = 0; // Reset if we get a LOW reading
+    }
+    
+    // Status every 500 steps
+    if (stepCount % 500 == 0) {
+      Serial.println("Step " + String(stepCount) + ", Sensor: " + String(sensorReading ? "HIGH" : "LOW") + ", Consecutive: " + String(consecutiveHighReadings));
+    }
+  }
+}
+
+void handleRoot() {
+  // Serve the main HTML file from SPIFFS
+  File file = SPIFFS.open("/index.html", "r");
+  if (!file) {
+    server.send(404, "text/plain", "File not found");
+    return;
+  }
+  
+  // Read the HTML template
+  String html = file.readString();
+  file.close();
+  
+  // Replace placeholders with current system state
+  html.replace("{CURRENT_POSITION}", String(currentPosition));
+  html.replace("{CLOSED_POSITION}", String(closedPosition));
+  html.replace("{IS_HOMED}", isHomed ? "YES" : "NO");
+  html.replace("{POSITION_STATUS}", positionLost ? "UNRELIABLE - Use OPEN to recalibrate" : "ACCURATE");
+  html.replace("{HOME_SENSOR}", digitalRead(HOME_SENSOR_PIN) ? "HIGH (TRIGGERED)" : "LOW (clear)");
+  
+  // Determine speed mode
+  String speedMode;
+  if (closedPosition > 0 && currentPosition >= (closedPosition * 0.8)) {
+    speedMode = "HEAVY LOAD (Extra Slow for Max Torque)";
+  } else {
+    speedMode = "NORMAL";
+  }
+  html.replace("{SPEED_MODE}", speedMode);
+  
+  server.send(200, "text/html", html);
+}
+
+void handleControl() {
+  if (!server.hasArg("action")) {
+    server.send(400, "text/plain", "No action specified");
+    return;
+  }
+
+  String action = server.arg("action");
+  Serial.println("Command received: " + action);
+
+  if (action == "stop") {
+    motorRunning = false;
+    positionLost = true;  // Mark position as unreliable
+    Serial.println("EMERGENCY STOP - Position may be inaccurate");
+    Serial.println("Use HOME or OPEN to recalibrate position");
+  }
+  else if (action == "home") {
+    // Stop any running operation first
+    if (motorRunning) {
+      Serial.println("Stopping current operation before homing...");
+      motorRunning = false;
+      delay(200); // Give time for operation to stop
+    }
+    Serial.println("Starting homing sequence…");
+    autoHome();
+    positionLost = false;  // Position is now accurate
+  }
+  else if (action == "manual" && server.hasArg("direction")) {
+    // Check if motor is already running
+    if (motorRunning) {
+      Serial.println("Motor already running - ignoring manual command (likely homing in progress)");
+      server.send(200, "text/plain", "Motor busy - homing in progress");
+      return;
+    }
+    
+    String direction = server.arg("direction");
+    Serial.println("Manual move: " + direction);
+
+    // Choose speed based on current position
+    int speedDelay = NORMAL_SPEED_DELAY;
+    if (currentPosition >= (closedPosition * 0.8) && direction == "up") {
+      speedDelay = HEAVY_LOAD_DELAY;
+      Serial.println("Using HEAVY LOAD speed for manual UP from closed position");
+    }
+
+    if (direction == "up") {
+      digitalWrite(DIR_PIN, HIGH);
+      runMotorSteps(MANUAL_STEP_SIZE, speedDelay, true, true);
+      currentPosition = max(0, currentPosition - MANUAL_STEP_SIZE);
+    } else if (direction == "down") {
+      digitalWrite(DIR_PIN, LOW);
+      runMotorSteps(MANUAL_STEP_SIZE, NORMAL_SPEED_DELAY, false, false);
+      currentPosition += MANUAL_STEP_SIZE;
+    }
+  }
+  else if (action == "save") {
+    if (currentPosition > 50) { // Prevent saving home as closed position
+      closedPosition = currentPosition;
+      EEPROM.put(EEPROM_ADDRESS, closedPosition);
+      EEPROM.commit();
+      Serial.println("Saved closed position: " + String(closedPosition) + " steps");
+    } else {
+      Serial.println("ERROR: Cannot save closed position - too close to home!");
+    }
+  }
+  else if (action == "open") {
+    // Check if motor is already running
+    if (motorRunning) {
+      Serial.println("Motor already running - ignoring open command (likely homing in progress)");
+      server.send(200, "text/plain", "Motor busy - homing in progress");
+      return;
+    }
+    Serial.println("Opening curtain - using reliable homing to sensor");
+    autoHome(); // Use the SAME reliable function as "Go to Home"
+    positionLost = false;  // Position is now accurate
+  }
+  else if (action == "close" && closedPosition > 0) {
+    // Check if motor is already running
+    if (motorRunning) {
+      Serial.println("Motor already running - ignoring close command (likely homing in progress)");
+      server.send(200, "text/plain", "Motor busy - homing in progress");
+      return;
+    }
+    if (positionLost) {
+      Serial.println("Cannot close - position lost after emergency stop");
+      Serial.println("Please use OPEN (to recalibrate) or HOME first");
+    } else {
+      Serial.println("Closing curtain - going to closed position");
+      moveToPosition(closedPosition); // Go to closed position
+    }
+  }
+  else {
+    Serial.println("Unknown or invalid command: " + action);
+  }
+
+  server.send(200, "text/plain", "OK");
+}
+
+void moveToPosition(int targetPosition) {
+  if (targetPosition == currentPosition) {
+    Serial.println("Already at target position");
+    return;
+  }
+
+  int stepsToMove = abs(targetPosition - currentPosition);
+  bool moveUp = (targetPosition < currentPosition);
+
+  Serial.println("Moving to position " + String(targetPosition) + " (currently at " + String(currentPosition) + ")");
+  Serial.println("Steps to move: " + String(stepsToMove) + ", Direction: " + String(moveUp ? "UP" : "DOWN"));
+
+  // Use slower speed if starting from closed position (heavy load)
+  int speedDelay = NORMAL_SPEED_DELAY;
+  if (currentPosition >= (closedPosition * 0.8) && moveUp) {
+    speedDelay = HEAVY_LOAD_DELAY;
+    Serial.println("Using HEAVY LOAD speed (extra slow) - starting from closed position");
+  }
+
+  digitalWrite(DIR_PIN, moveUp ? HIGH : LOW);
+  runMotorSteps(stepsToMove, speedDelay, moveUp, moveUp);
+
+  currentPosition = targetPosition;
+  Serial.println("Movement complete. New position: " + String(currentPosition));
+}
+
+void runMotorSteps(int steps, int delayMicros, bool direction, bool checkSensor) {
+  digitalWrite(DIR_PIN, direction ? HIGH : LOW);
+  motorRunning = true;
+
+  Serial.println("Running " + String(steps) + " steps, direction: " + String(direction ? "UP" : "DOWN"));
+  Serial.println("Speed: " + String(delayMicros) + " microseconds delay");
+
+  int consecutiveHighReadings = 0; // For sensor filtering
+  const int SENSOR_CONFIRM_COUNT = 3; // Need 3 consecutive readings for manual moves
+
+  for(int i = 0; i < steps && motorRunning; i++) {
+    // Check if stop was requested more frequently for faster response
+    if (i % 10 == 0) {  // Check every 10 steps instead of 100
+      server.handleClient();
+      if (!motorRunning) {
+        Serial.println("Emergency stop detected during movement");
+        break;
+      }
+    }
+
+    // Check home sensor if moving up with filtering (sensor triggered = HIGH)
+    if (checkSensor && direction) { // Only when moving up
+      bool sensorReading = digitalRead(HOME_SENSOR_PIN);
+      
+      if (sensorReading == HIGH) {
+        consecutiveHighReadings++;
+        if (consecutiveHighReadings >= SENSOR_CONFIRM_COUNT) {
+          Serial.println("Home sensor confirmed during movement - stopping");
+          Serial.println("Consecutive HIGH readings: " + String(consecutiveHighReadings));
+          currentPosition = 0;
+          positionLost = false;  // Position is accurate at home
+          break;
+        }
+      } else {
+        consecutiveHighReadings = 0; // Reset on LOW reading
+      }
+      
+      // Debug sensor every 100 steps when checking
+      if (i % 100 == 0) {
+        Serial.println("Step " + String(i) + ", Sensor: " + String(sensorReading ? "HIGH" : "LOW") + ", Consecutive: " + String(consecutiveHighReadings));
+      }
+    }
+
+    digitalWrite(STEP_PIN, HIGH);
+    delayMicroseconds(50);
+    digitalWrite(STEP_PIN, LOW);
+    delayMicroseconds(delayMicros);
+  }
+
+  motorRunning = false;
+  Serial.println("Motor movement finished");
+}
