@@ -7,7 +7,7 @@
 #include <ArduinoJson.h>
 #include <NTPClient.h>
 #include <WiFiUdp.h>
-#include <AsyncWebSocket.h>
+#include <AsyncWebSocket.h> 
 #include <AsyncJson.h>
 #include <time.h> // Include time.h for date manipulation
 
@@ -579,3 +579,6 @@ void loop() {
 }
 
 
+// End of code
+// This code is a simple web server for controlling a curtain motor using an ESP32. It allows manual control, scheduling, and settings adjustment through a web interface. The code includes NTP time synchronization and handles button debouncing for physical buttons. The settings and schedule are stored in SPIFFS (SPI Flash File System) on the ESP32. The web interface is styled with CSS for a modern look.
+// The code is structured to handle HTTP requests and responses using the ESPAsyncWebServer library, making it efficient for handling multiple connections.
