@@ -2,6 +2,11 @@
 #include <WiFi.h>
 #include <WebServer.h>
 #include <EEPROM.h>
+#include <Wire.h>
+#include <Adafruit_Sensor.h>
+#include <Adafruit_BME680.h>
+#include <PubSubClient.h>
+#include <ArduinoJson.h>
 
 // Pin definitions
 #define STEP_PIN 2
@@ -26,6 +31,24 @@
 const char* ssid = "VM6159022";
 const char* password = "rcgc4yyYdfrt";
 
+// ===== BME680 sensor (I2C on pins 32/33) =====
+#define SDA_PIN 32
+#define SCL_PIN 33
+// BME680 I2C address: 0x77 if SDO is floating/high, 0x76 if SDO is grounded
+#define BME680_ADDR 0x77
+
+// ===== MQTT — fill in your Home Assistant details =====
+const char* MQTT_BROKER    = "192.168.0.41";
+const int   MQTT_PORT      = 1883;
+const char* MQTT_USER      = "";              // ← Mosquitto username (leave blank if none)
+const char* MQTT_PASS      = "";              // ← Mosquitto password (leave blank if none)
+const char* MQTT_CLIENT_ID = "smartcurtain_esp32";
+#define MQTT_STATE_TOPIC       "smartcurtain/sensor/state"
+#define MQTT_COVER_CMD_TOPIC   "smartcurtain/cover/command"     // HA → ESP: OPEN/CLOSE/STOP
+#define MQTT_COVER_SET_TOPIC   "smartcurtain/cover/set_position" // HA → ESP: 0-100
+#define MQTT_COVER_POS_TOPIC   "smartcurtain/cover/position"    // ESP → HA: 0-100
+#define MQTT_COVER_STATE_TOPIC "smartcurtain/cover/state"        // ESP → HA: open/closed/opening/closing/stopped
+
 // Web server
 WebServer server(80);
 
@@ -44,13 +67,27 @@ int  desk2CurrentDuty = 0;
 bool chargerOn        = false;
 bool corridorOn       = false;
 
+// Cover command queue (set from MQTT callback, executed in loop)
+enum CoverCommand { CMD_NONE, CMD_OPEN, CMD_CLOSE, CMD_SET_POS };
+volatile CoverCommand pendingCoverCmd = CMD_NONE;
+volatile int          pendingCoverPos = 0;  // target steps for CMD_SET_POS
+
+// BME680 + MQTT
+Adafruit_BME680 bme;
+WiFiClient      mqttNet;
+PubSubClient    mqtt(mqttNet);
+bool            bmeAvailable        = false;
+unsigned long   lastSensorPublish   = 0;
+const unsigned long SENSOR_INTERVAL = 30000;  // ms
+
 // Constants (1/16 microstepping - MS1/MS2/MS3 all wired to 3.3V)
 const int HOMING_TIMEOUT_MS = 90000;
 const int HOMING_SPEED_DELAY = 1600;
 const int NORMAL_SPEED_DELAY = 950;
 const int HEAVY_LOAD_DELAY = 1600;
 const int MANUAL_STEP_SIZE = 1600;  // ~0.5 rev per manual tap at 1/16 step
-const int EEPROM_ADDRESS = 0;
+const int EEPROM_ADDRESS          = 0;  // closedPosition (int, 4 bytes)
+const int EEPROM_CURR_POS_ADDRESS = 4;  // currentPosition (int, 4 bytes)
 
 // Embedded HTML
 const char* HTML_PAGE = R"rawliteral(
@@ -301,6 +338,11 @@ const char* HTML_PAGE = R"rawliteral(
 )rawliteral";
 
 // Function declarations
+void mqttConnect();
+void publishDiscovery();
+void publishSensorData();
+void publishCoverState();
+void mqttCallback(char* topic, byte* payload, unsigned int length);
 void runMotorSteps(int steps, int delayMicros, bool direction, bool checkSensor = false);
 void handleRoot();
 void handleControl();
@@ -356,10 +398,12 @@ void setup() {
   Serial.println("Smart Curtain Controller Starting...");
 
   EEPROM.get(EEPROM_ADDRESS, closedPosition);
-  if (closedPosition < 0 || closedPosition > 50000) {
-    closedPosition = 0;
-  }
+  if (closedPosition < 0 || closedPosition > 50000) closedPosition = 0;
   Serial.println("Loaded closed position: " + String(closedPosition) + " steps");
+
+  EEPROM.get(EEPROM_CURR_POS_ADDRESS, currentPosition);
+  if (currentPosition < 0 || currentPosition > 50000) currentPosition = 0;
+  Serial.println("Loaded last position: " + String(currentPosition) + " steps");
 
   WiFi.begin(ssid, password);
   Serial.print("Connecting to WiFi");
@@ -420,13 +464,33 @@ void setup() {
   Serial.println("Desk2 OFF:   http://" + WiFi.localIP().toString() + "/desk2/off");
   Serial.println("Desk2 Dim:   http://" + WiFi.localIP().toString() + "/desk2/brightness?level=75");
 
+  // BME680
+  Wire.begin(SDA_PIN, SCL_PIN);
+  if (bme.begin(BME680_ADDR, &Wire)) {
+    bmeAvailable = true;
+    bme.setTemperatureOversampling(BME680_OS_8X);
+    bme.setHumidityOversampling(BME680_OS_2X);
+    bme.setPressureOversampling(BME680_OS_4X);
+    bme.setIIRFilterSize(BME680_FILTER_SIZE_3);
+    bme.setGasHeater(320, 150);  // 320°C for 150 ms — standard air-quality setting
+    Serial.println("BME680 ready");
+  } else {
+    Serial.println("BME680 NOT found — check wiring or try address 0x76");
+  }
+
+  // MQTT
+  mqtt.setServer(MQTT_BROKER, MQTT_PORT);
+  mqtt.setBufferSize(800);  // cover discovery payload is ~620 bytes; 512 was too small
+  mqttConnect();
+
   Serial.println("Auto-homing...");
   autoHome();
 }
 
 void loop() {
   server.handleClient();
-  
+
+  // WiFi watchdog
   static unsigned long lastWiFiCheck = 0;
   if (millis() - lastWiFiCheck > 60000) {
     if (WiFi.status() != WL_CONNECTED) {
@@ -435,7 +499,242 @@ void loop() {
     }
     lastWiFiCheck = millis();
   }
+
+  // MQTT keep-alive + reconnect
+  if (WiFi.status() == WL_CONNECTED) {
+    if (!mqtt.connected()) {
+      static unsigned long lastMqttRetry = 0;
+      if (millis() - lastMqttRetry > 10000) {
+        lastMqttRetry = millis();
+        mqttConnect();
+      }
+    }
+    mqtt.loop();
+  }
+
+  // Publish sensor data every 30 s
+  if (bmeAvailable && mqtt.connected() &&
+      millis() - lastSensorPublish > SENSOR_INTERVAL) {
+    publishSensorData();
+    lastSensorPublish = millis();
+  }
+
+  // Process pending MQTT cover commands (set by callback, executed here so motor
+  // functions run in loop() context — safe to call mqtt.loop() inside them)
+  if (pendingCoverCmd != CMD_NONE && !motorRunning) {
+    CoverCommand cmd = (CoverCommand)pendingCoverCmd;
+    int          pos = pendingCoverPos;
+    pendingCoverCmd  = CMD_NONE;
+
+    switch (cmd) {
+      case CMD_OPEN:
+        if (mqtt.connected()) mqtt.publish(MQTT_COVER_STATE_TOPIC, "opening", true);
+        autoHome();
+        publishCoverState();
+        break;
+
+      case CMD_CLOSE:
+        if (closedPosition > 0) {
+          if (mqtt.connected()) mqtt.publish(MQTT_COVER_STATE_TOPIC, "closing", true);
+          if (positionLost) autoHome();
+          moveToPosition(closedPosition);
+          publishCoverState();
+        }
+        break;
+
+      case CMD_SET_POS:
+        if (closedPosition > 0 && !positionLost) {
+          bool goingUp = (pos < currentPosition);
+          if (mqtt.connected())
+            mqtt.publish(MQTT_COVER_STATE_TOPIC, goingUp ? "opening" : "closing", true);
+          moveToPosition(pos);
+          publishCoverState();
+        }
+        break;
+
+      default: break;
+    }
+  }
 }
+
+// ===== BME680 / MQTT =====
+
+void publishDiscovery() {
+  // All four sensors share one state topic; HA picks values via value_template.
+  // Payloads are retained so HA picks them up even after an HA restart.
+  struct SensorDef {
+    const char* id;
+    const char* name;
+    const char* device_class;  // empty string = no device_class key
+    const char* unit;
+    const char* value_template;
+    const char* icon;
+    const char* state_class;
+  };
+
+  const SensorDef sensors[] = {
+    {"temperature", "Room Temperature", "temperature", "°C",
+     "{{ value_json.temperature | round(1) }}", "mdi:thermometer", "measurement"},
+    {"humidity",    "Room Humidity",    "humidity",    "%",
+     "{{ value_json.humidity | round(1) }}",    "mdi:water-percent", "measurement"},
+    {"pressure",    "Room Pressure",    "pressure",    "hPa",
+     "{{ value_json.pressure | round(1) }}",    "mdi:gauge", "measurement"},
+    {"gas",         "Room Air Quality", "",            "kΩ",
+     "{{ value_json.gas | round(0) }}",         "mdi:air-filter", "measurement"},
+  };
+
+  for (const auto& s : sensors) {
+    StaticJsonDocument<512> doc;
+    doc["name"]                = s.name;
+    if (s.device_class[0] != '\0') doc["device_class"] = s.device_class;
+    doc["state_class"]         = s.state_class;
+    doc["state_topic"]         = MQTT_STATE_TOPIC;
+    doc["unit_of_measurement"] = s.unit;
+    doc["value_template"]      = s.value_template;
+    doc["unique_id"]           = String("smartcurtain_") + s.id;
+    doc["expire_after"]        = 120;
+    doc["icon"]                = s.icon;
+
+    JsonObject device = doc.createNestedObject("device");
+    device["identifiers"][0]   = "smartcurtain_esp32";
+    device["name"]             = "Smart Curtain Room";
+    device["model"]            = "ESP32 + BME680";
+    device["manufacturer"]     = "DIY";
+
+    String payload;
+    serializeJson(doc, payload);
+
+    String topic = String("homeassistant/sensor/smartcurtain_") + s.id + "/config";
+    mqtt.publish(topic.c_str(), payload.c_str(), true);  // retain = true
+    delay(50);
+  }
+  // Cover entity — gives HA the position slider
+  {
+    StaticJsonDocument<800> doc;
+    doc["name"]               = "Bedroom Curtain";
+    doc["device_class"]       = "curtain";
+    doc["command_topic"]      = MQTT_COVER_CMD_TOPIC;
+    doc["payload_open"]       = "OPEN";
+    doc["payload_close"]      = "CLOSE";
+    doc["payload_stop"]       = "STOP";
+    doc["state_topic"]        = MQTT_COVER_STATE_TOPIC;
+    doc["state_open"]         = "open";
+    doc["state_closed"]       = "closed";
+    doc["state_opening"]      = "opening";
+    doc["state_closing"]      = "closing";
+    doc["position_topic"]     = MQTT_COVER_POS_TOPIC;
+    doc["set_position_topic"] = MQTT_COVER_SET_TOPIC;
+    doc["position_open"]      = 100;
+    doc["position_closed"]    = 0;
+    doc["optimistic"]         = false;
+    doc["unique_id"]          = "smartcurtain_cover";
+
+    JsonObject device = doc.createNestedObject("device");
+    device["identifiers"][0]  = "smartcurtain_esp32";
+    device["name"]            = "Smart Curtain Room";
+    device["model"]           = "ESP32 + BME680";
+    device["manufacturer"]    = "DIY";
+
+    String payload;
+    serializeJson(doc, payload);
+    mqtt.publish("homeassistant/cover/smartcurtain_cover/config", payload.c_str(), true);
+    delay(50);
+  }
+
+  Serial.println("MQTT: auto-discovery published");
+}
+
+void mqttConnect() {
+  mqtt.setCallback(mqttCallback);
+  mqtt.setKeepAlive(90);  // longer than max motor run time so connection survives long moves
+
+  int retries = 0;
+  while (!mqtt.connected() && retries < 5) {
+    Serial.print("MQTT connecting... ");
+    bool ok = (strlen(MQTT_USER) > 0)
+      ? mqtt.connect(MQTT_CLIENT_ID, MQTT_USER, MQTT_PASS)
+      : mqtt.connect(MQTT_CLIENT_ID);
+    if (ok) {
+      Serial.println("connected!");
+      mqtt.subscribe(MQTT_COVER_CMD_TOPIC);
+      mqtt.subscribe(MQTT_COVER_SET_TOPIC);
+      publishDiscovery();
+      publishCoverState();  // let HA know current position on reconnect
+    } else {
+      Serial.print("failed, rc=");
+      Serial.println(mqtt.state());
+      delay(2000);
+      retries++;
+    }
+  }
+}
+
+void publishSensorData() {
+  if (!bme.performReading()) {
+    Serial.println("BME680: reading failed");
+    return;
+  }
+
+  StaticJsonDocument<128> doc;
+  doc["temperature"] = round(bme.temperature * 10.0f) / 10.0f;
+  doc["humidity"]    = round(bme.humidity    * 10.0f) / 10.0f;
+  doc["pressure"]    = round((bme.pressure / 100.0f) * 10.0f) / 10.0f;  // Pa → hPa
+  doc["gas"]         = round(bme.gas_resistance / 1000.0f);              // Ω → kΩ
+
+  char payload[128];
+  serializeJson(doc, payload);
+
+  if (mqtt.publish(MQTT_STATE_TOPIC, payload)) {
+    Serial.printf("MQTT: T=%.1f°C  H=%.1f%%  P=%.1fhPa  Gas=%.0fkΩ\n",
+      bme.temperature, bme.humidity,
+      bme.pressure / 100.0f, bme.gas_resistance / 1000.0f);
+  } else {
+    Serial.println("MQTT: publish failed");
+  }
+}
+
+void publishCoverState() {
+  if (!mqtt.connected() || closedPosition == 0) return;
+
+  int haPos = 100 - (int)round((float)currentPosition / closedPosition * 100.0f);
+  haPos = constrain(haPos, 0, 100);
+
+  const char* state;
+  if (haPos >= 99)     state = "open";
+  else if (haPos <= 1) state = "closed";
+  else                 state = "stopped";
+
+  mqtt.publish(MQTT_COVER_POS_TOPIC,   String(haPos).c_str(), true);
+  mqtt.publish(MQTT_COVER_STATE_TOPIC, state,                  true);
+}
+
+void mqttCallback(char* topic, byte* payload, unsigned int length) {
+  String t(topic);
+  String msg;
+  for (unsigned int i = 0; i < length; i++) msg += (char)payload[i];
+
+  if (t == MQTT_COVER_CMD_TOPIC) {
+    if (msg == "STOP") {
+      // STOP is handled immediately — directly kills the motor loop
+      motorRunning    = false;
+      positionLost    = true;
+      pendingCoverCmd = CMD_NONE;
+      EEPROM.put(EEPROM_CURR_POS_ADDRESS, currentPosition);
+      EEPROM.commit();
+    } else if (msg == "OPEN") {
+      pendingCoverCmd = CMD_OPEN;
+    } else if (msg == "CLOSE") {
+      pendingCoverCmd = CMD_CLOSE;
+    }
+  } else if (t == MQTT_COVER_SET_TOPIC) {
+    int targetPct   = constrain(msg.toInt(), 0, 100);
+    // HA: 100 = open (steps=0), 0 = closed (steps=closedPosition)
+    pendingCoverPos = (int)round((100 - targetPct) / 100.0f * closedPosition);
+    pendingCoverCmd = CMD_SET_POS;
+  }
+}
+
+// ===== HTTP handlers =====
 
 void handleSiriUp() {
   Serial.println("*** HTTP: OPEN ***");
@@ -579,6 +878,9 @@ void handleControl() {
       runMotorSteps(MANUAL_STEP_SIZE, NORMAL_SPEED_DELAY, false, false);
       currentPosition += MANUAL_STEP_SIZE;
     }
+    EEPROM.put(EEPROM_CURR_POS_ADDRESS, currentPosition);
+    EEPROM.commit();
+    publishCoverState();
     return;
   }
   else if (action == "save") {
@@ -633,6 +935,9 @@ void autoHome() {
     isHomed = true;
     positionLost = false;
     motorRunning = false;
+    EEPROM.put(EEPROM_CURR_POS_ADDRESS, currentPosition);
+    EEPROM.commit();
+    publishCoverState();
     return;
   }
 
@@ -660,6 +965,7 @@ void autoHome() {
 
     if (stepCount % 50 == 0) {
       server.handleClient();
+      if (mqtt.connected()) mqtt.loop();
       if (!motorRunning) {
         Serial.println("Homing stopped");
         positionLost = true;
@@ -695,6 +1001,9 @@ void autoHome() {
         isHomed = true;
         positionLost = false;
         motorRunning = false;
+        EEPROM.put(EEPROM_CURR_POS_ADDRESS, currentPosition);
+        EEPROM.commit();
+        publishCoverState();
         return;
       }
     } else {
@@ -727,6 +1036,9 @@ void moveToPosition(int targetPosition) {
 
   currentPosition = targetPosition;
   Serial.println("Done - Position: " + String(currentPosition));
+  EEPROM.put(EEPROM_CURR_POS_ADDRESS, currentPosition);
+  EEPROM.commit();
+  publishCoverState();
 }
 
 void runMotorSteps(int steps, int delayMicros, bool direction, bool checkSensor) {
@@ -739,6 +1051,7 @@ void runMotorSteps(int steps, int delayMicros, bool direction, bool checkSensor)
   for(int i = 0; i < steps && motorRunning; i++) {
     if (i % 10 == 0) {
       server.handleClient();
+      if (mqtt.connected()) mqtt.loop();
       if (!motorRunning) {
         Serial.println("Stopped");
         break;
